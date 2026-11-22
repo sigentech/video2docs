@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     llm_api_key: str = Field(default="", alias="api_key")
     llm_model: str = Field(default="", alias="model")
 
-    # Whisper配置（用于语音转文字，与 LLM 分开）
+    # Whisper专用配置（可选，默认复用 LLM 的 base_url 和 api_key）
     whisper_base_url: str = Field(default="", alias="whisper_base_url")
     whisper_api_key: str = Field(default="", alias="whisper_api_key")
 
@@ -43,7 +43,9 @@ class Settings(BaseSettings):
     @property
     def is_whisper_api_configured(self) -> bool:
         """检查是否已配置 Whisper API"""
-        return bool(self.whisper_base_url and self.whisper_api_key)
+        base_url = self.whisper_base_url or self.llm_base_url
+        api_key = self.whisper_api_key or self.llm_api_key
+        return bool(base_url and api_key)
 
 
 def get_settings() -> Settings:

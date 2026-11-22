@@ -15,7 +15,7 @@
 - **智能关键帧定位**: LLM 自动识别需要插入图片的位置
 - **关键帧截取**: 使用 FFmpeg 按时间戳截取视频画面
 - **多格式输出**: 同时生成 Markdown 和 PDF 文档
-- **连续处理**: 支持连续转换多个视频，Whisper 模式自动沿用
+- **批量处理**: 一次传入多个视频文件或视频链接，按顺序自动转换
 - **错误重试**: 失败时自动询问是否重试（最多 3 次）
 
 ### 转换流程
@@ -72,8 +72,8 @@ base_url=your_base_url
 api_key=your_api_key
 model=your_model_name
 
-# Whisper 配置（用于语音转文字，独立于 LLM,可选填入）
-whisper_base_url=your_base_url #(but insure to use model "whisper-1")
+# Whisper 专用配置（可选；不填时复用上面的 base_url 和 api_key）
+whisper_base_url=your_base_url
 whisper_api_key=your_api_key
 ```
 
@@ -84,8 +84,10 @@ whisper_api_key=your_api_key
 | `base_url` | LLM API 地址 | `https://api.openai.com/v1` 或其他兼容 API |
 | `api_key` | LLM API 密钥 | 你的 API 密钥 |
 | `model` | 使用的模型名称 | `gpt-4o`, `gemini-3-flash-preview` 等 |
-| `whisper_base_url` | Whisper API 地址 | `https://api.openai.com/v1` |
-| `whisper_api_key` | Whisper API 密钥 | 可以与 `api_key` 相同 |
+| `whisper_base_url` | Whisper API 地址（可选） | 默认使用 `base_url` |
+| `whisper_api_key` | Whisper API 密钥（可选） | 默认使用 `api_key` |
+
+命令行也支持 `--base-url`、`--api-key`、`--model` 覆盖 `.env`；密钥写在命令行会进入 shell 历史，日常使用优先放在 `.env`。
 
 ## 使用方法
 
@@ -95,7 +97,7 @@ whisper_api_key=your_api_key
 python -m video2docs "https://www.bilibili.com/video/BVxxx"
 ```
 
-或使用快速启动脚本，可启动后再输入视频链接（推荐）
+或使用快速启动脚本，可启动后再输入视频文件或链接（推荐）
 ```bash
 ./v2d.sh
 ```
@@ -103,16 +105,18 @@ python -m video2docs "https://www.bilibili.com/video/BVxxx"
 ### 命令行参数
 
 ```bash
-python -m video2docs [URL] [OPTIONS]
+python -m video2docs [VIDEO_OR_URL...] [OPTIONS]
 ```
 
 #### 参数说明
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `URL` | 视频链接 | 无 (交互式输入) |
-| `--base-dir` | 基础目录 | 当前目录 |
-| `--model` | 使用的 LLM 模型 | .env 中的配置 |
+| `VIDEO_OR_URL...` | 一个或多个视频文件或视频链接 | 无 (交互式输入) |
+| `--output-dir`, `-o` | 结果目录 | `output` |
+| `--base-url` | LLM API 基础 URL | `.env` 中的 `base_url` |
+| `--api-key` | LLM API 密钥 | `.env` 中的 `api_key` |
+| `--model` | 使用的 LLM 模型 | `.env` 中的 `model` |
 | `--whisper` | 语音模式: `api` 或 `local` | 交互式选择 |
 
 ### 使用示例
@@ -127,12 +131,27 @@ python -m video2docs "https://www.bilibili.com/video/BV1xx411c7mD"
 # 指定模型
 python -m video2docs "https://www.bilibili.com/video/BVxxx" --model gpt-4o
 
+# 命令行直接提供 LLM 配置
+python -m video2docs "https://www.bilibili.com/video/BVxxx" \
+  --base-url https://api.openai.com/v1 \
+  --api-key your_api_key \
+  --model gpt-4o
+
 # 使用本地 Whisper
 python -m video2docs "https://www.bilibili.com/video/BVxxx" --whisper local
 
 # 指定输出目录
-python -m video2docs "https://www.bilibili.com/video/BVxxx" --base-dir /path/to/dir
+python -m video2docs "https://www.bilibili.com/video/BVxxx" --output-dir /path/to/dir
+
+# 批量处理多个本地视频和视频链接
+python -m video2docs "video1.mp4" "video2.mp4" \
+  "https://www.bilibili.com/video/BVxxx" --whisper local
+
+# 批量处理后统一输出到指定目录
+python -m video2docs "video1.mp4" "https://youtu.be/xxxx" -o ./output
 ```
+
+批量模式下任务按参数顺序逐个处理，单个任务失败不会中断后续任务；全部结束后会输出成功/失败汇总。
 
 ## 交互式使用
 
@@ -149,7 +168,7 @@ python -m video2docs
 程序会引导你完成转换：
 
 1. **选择语音转文字方式** - 选择 Whisper API 或本地模型
-2. **输入视频链接** - 输入 B站/YouTube 等视频链接
+2. **输入视频来源** - 输入本地视频文件或 B站/YouTube 等视频链接
 3. **自动执行转换** - 6 个阶段自动完成
 4. **转换完成** - 查看任务目录中的结果
 
@@ -170,14 +189,14 @@ python -m video2docs
 
 ## 输出结果
 
-转换完成后，在任务目录中生成以下文件：
+转换完成后，结果默认保存在 `output/`。每个视频使用独立任务目录：
 
 ```
-task_X/
-├── temp/
-│   ├── video.mp4          # 下载的视频
-│   └── transcript.json    # 转录结果
-└── output/
+output/
+└── task_X/
+    ├── temp/
+    │   ├── video.mp4      # 下载的视频
+    │   └── transcript.json
     ├── *.md               # Markdown 文档
     ├── *.pdf              # PDF 文档
     └── images/            # 关键帧截图
@@ -191,7 +210,8 @@ task_X/
 ### Whisper API 模式
 
 - 使用 OpenAI Whisper API 进行转录
-- 需要配置 `whisper_base_url` 和 `whisper_api_key`
+- 默认复用 `base_url` 和 `api_key`
+- 如果 Whisper 使用独立服务，可额外配置 `whisper_base_url` 和 `whisper_api_key`
 - 转写质量高，识别精准
 - 需要支付 API 费用
 

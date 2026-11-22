@@ -1,7 +1,7 @@
 """CLI入口模块 - 命令行界面"""
 import typer
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -16,24 +16,24 @@ app = typer.Typer(
 console = Console()
 
 
-def get_next_task_id(base_dir: Path = Path(".")) -> int:
+def get_next_task_id(output_dir: Path = Path("output")) -> int:
     """获取下一个任务ID"""
-    task_dirs = [d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("task_")]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    task_dirs = [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("task_")]
     if not task_dirs:
         return 1
     ids = [int(d.name.split("_")[1]) for d in task_dirs if d.name.split("_")[1].isdigit()]
     return max(ids) + 1 if ids else 1
 
 
-def create_task_folder(base_dir: Path = Path(".")) -> Path:
+def create_task_folder(output_dir: Path = Path("output")) -> Path:
     """创建任务文件夹"""
-    task_id = get_next_task_id(base_dir)
-    task_dir = base_dir / f"task_{task_id}"
-    task_dir.mkdir(parents=True, exist_ok=True)
+    task_id = get_next_task_id(output_dir)
+    task_dir = output_dir / f"task_{task_id}"
+    task_dir.mkdir(exist_ok=True)
 
-    # 创建 temp 和 output 子目录
+    # 临时文件留在任务目录内，结果直接写入任务目录
     (task_dir / "temp").mkdir(exist_ok=True)
-    (task_dir / "output").mkdir(exist_ok=True)
 
     return task_dir
 
@@ -47,6 +47,7 @@ def show_welcome():
 
 [yellow]功能：[/yellow]
   - 支持多平台视频下载（B站、YouTube等）
+  - 支持批量处理多个视频文件或视频链接
   - 语音转文字（Whisper API / 本地模型）
   - LLM内容润色
   - 智能关键帧定位
@@ -54,9 +55,9 @@ def show_welcome():
 
 [yellow]使用方式：[/yellow]
   1. 选择语音转文字方式
-  2. 输入视频链接
+  2. 输入视频文件或链接
   3. 等待自动转换完成
-  4. 在任务目录查看结果
+  4. 在 output/task_N 查看结果
         """,
         title="欢迎使用 Video2Docs",
         border_style="cyan"
@@ -89,21 +90,25 @@ def select_whisper_mode() -> str:
 
 
 def run_conversion(
-    url: str,
-    base_path: Path,
-    model: str,
+    source: str,
+    output_dir: Path,
+    model: Optional[str],
     whisper_mode: str,
-    transcriber=None
+    transcriber=None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
 ):
     """
     执行转换流程
 
     Args:
-        url: 视频链接
-        base_path: 基础路径
+        source: 视频文件或链接
+        output_dir: 结果目录
         model: LLM 模型
         whisper_mode: Whisper 模式
         transcriber: 可选的转录器实例（用于复用）
+        base_url: LLM API 基础 URL
+        api_key: LLM API 密钥
 
     Returns:
         (success: bool, transcriber: Transcriber or None)
@@ -120,11 +125,19 @@ def run_conversion(
     # 加载配置
     settings = get_settings()
 
+    # 使用命令行参数覆盖配置
+    if base_url:
+        settings.llm_base_url = base_url
+    if api_key:
+        settings.llm_api_key = api_key
+    if model:
+        settings.llm_model = model
+
     # 检查 LLM 配置
     if not settings.is_configured:
-        console.print("[red]错误: 请先配置 .env 文件[/red]")
+        console.print("[red]错误: 请先配置 base_url、api_key 和 model[/red]")
         console.print("""
-请创建 .env 文件，内容如下：
+可通过 .env 或命令行参数提供：
 base_url=your_api_base_url
 api_key=your_api_key
 model=your_model_name
@@ -133,44 +146,52 @@ model=your_model_name
 
     # 如果选择 API 模式但未配置，返回错误
     if whisper_mode == "api" and not settings.is_whisper_api_configured:
-        console.print("[red]Whisper API 模式需要配置 whisper_base_url 和 whisper_api_key[/red]")
-        console.print("请在 .env 中添加：")
-        console.print("whisper_base_url=https://api.openai.com/v1")
-        console.print("whisper_api_key=your_api_key")
-        console.print("或选择本地模式 [2]")
+        console.print("[red]Whisper API 模式需要 API 地址和密钥[/red]")
+        console.print("默认复用 base_url 和 api_key，也可配置 whisper_base_url 和 whisper_api_key")
+        console.print("或者选择本地模式 [2]")
         return False, transcriber
 
-    # 使用命令行参数覆盖配置
-    if model:
-        settings.llm_model = model
-
     # 创建任务文件夹
-    task_dir = create_task_folder(base_path)
+    task_dir = create_task_folder(output_dir)
     temp_path = task_dir / "temp"
-    output_path = task_dir / "output"
+    output_path = task_dir
 
     try:
         # 显示任务信息
         console.print(f"\n[bold]任务信息[/bold]")
         console.print(f"   模型: {settings.llm_model}")
         console.print(f"   语音: {'Whisper API' if whisper_mode == 'api' else '本地模型'}")
-        console.print(f"   链接: {url[:50]}...")
+        display_source = source if len(source) <= 80 else f"{source[:77]}..."
+        console.print(f"   来源: {display_source}")
         console.print(f"   目录: {task_dir}\n")
 
-        # 阶段1: 下载视频
-        console.print("[bold cyan]阶段 1/6: 下载视频[/bold cyan]")
+        # 阶段1: 准备视频
         downloader = VideoDownloader(temp_path)
-        video_info = downloader.get_video_info(url)
-        if not video_info:
-            console.print("[red]获取视频信息失败[/red]")
-            return False, transcriber
+        source_path = Path(source).expanduser()
+        if source_path.is_file():
+            console.print("[bold cyan]阶段 1/6: 读取本地视频[/bold cyan]")
+            video_path = source_path.resolve()
+            frame_extractor = FrameExtractor(output_path / "images")
+            video_info = {
+                'title': video_path.stem,
+                'duration': frame_extractor.get_video_duration(video_path) or 0,
+                'description': '',
+                'uploader': '本地视频',
+                'url': video_path.as_uri(),
+            }
+        else:
+            console.print("[bold cyan]阶段 1/6: 下载视频[/bold cyan]")
+            video_info = downloader.get_video_info(source)
+            if not video_info:
+                console.print("[red]获取视频信息失败[/red]")
+                return False, transcriber
 
-        video_path = downloader.download(url)
-        if not video_path:
-            console.print("[red]视频下载失败[/red]")
-            return False, transcriber
+            video_path = downloader.download(source)
+            if not video_path:
+                console.print("[red]视频下载失败[/red]")
+                return False, transcriber
 
-        console.print(f"   [OK] 下载完成: {video_path.name}\n")
+        console.print(f"   [OK] 视频就绪: {video_path.name}\n")
 
         # 阶段2: 语音转文字
         mode_display = "Whisper API" if whisper_mode == "api" else "本地模型"
@@ -181,8 +202,8 @@ model=your_model_name
             if whisper_mode == "api":
                 # 创建 OpenAI 客户端
                 llm_client = OpenAI(
-                    base_url=settings.whisper_base_url,
-                    api_key=settings.whisper_api_key
+                    base_url=settings.whisper_base_url or settings.llm_base_url,
+                    api_key=settings.whisper_api_key or settings.llm_api_key
                 )
                 transcriber = Transcriber(
                     mode="api",
@@ -290,34 +311,56 @@ model=your_model_name
 
 @app.command()
 def main(
-    url: str = typer.Argument(None, help="视频链接"),
-    base_dir: str = typer.Option(".", help="基础目录"),
+    sources: Optional[List[str]] = typer.Argument(None, help="一个或多个视频文件或视频链接"),
+    output_dir: Path = typer.Option(Path("output"), "--output-dir", "-o", help="结果目录"),
+    base_url: Optional[str] = typer.Option(None, help="LLM API 基础 URL"),
+    api_key: Optional[str] = typer.Option(None, help="LLM API 密钥"),
     model: Optional[str] = typer.Option(None, help="使用的模型"),
     whisper: Optional[str] = typer.Option(None, help="语音模式: api 或 local"),
 ):
     """
     将视频转换为 Markdown/PDF 文档
+
+    传入多个视频文件或链接时按顺序批量处理。
     """
     from .transcriber import clear_model_cache
 
-    base_path = Path(base_dir)
+    output_path = output_dir.expanduser()
 
-    # 如果没有提供URL，显示交互式界面
-    if url is None:
+    # 如果没有提供来源，显示交互式界面
+    if not sources:
         show_welcome()
         # 进入连续处理模式
-        run_interactive_mode(base_path, model)
+        run_interactive_mode(
+            output_path,
+            model=model,
+            base_url=base_url,
+            api_key=api_key
+        )
     else:
-        # 单次执行模式
         # 先选择 whisper 模式
         whisper_mode = whisper if whisper else select_whisper_mode()
 
-        success, _ = run_conversion(url, base_path, model, whisper_mode)
-
-        if success:
-            console.print("\n[bold green]按回车键退出...[/bold green]")
-            input()
+        if len(sources) == 1:
+            success, _ = run_conversion(
+                sources[0],
+                output_path,
+                model,
+                whisper_mode,
+                base_url=base_url,
+                api_key=api_key
+            )
         else:
+            success = run_batch(
+                sources,
+                output_path,
+                model,
+                whisper_mode,
+                base_url=base_url,
+                api_key=api_key
+            )
+
+        if not success:
             console.print("\n[bold red]转换失败，请检查错误信息[/bold red]")
             raise typer.Exit(1)
 
@@ -325,7 +368,49 @@ def main(
     clear_model_cache()
 
 
-def run_interactive_mode(base_path: Path, model: Optional[str] = None):
+def run_batch(
+    sources: List[str],
+    output_dir: Path,
+    model: Optional[str],
+    whisper_mode: str,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> bool:
+    """顺序批量处理视频与链接，单个失败不会中断后续任务。"""
+    transcriber = None
+    results = []
+
+    for index, source in enumerate(sources, 1):
+        console.rule(f"[bold]批量任务 {index}/{len(sources)}[/bold]")
+        success, transcriber = run_conversion(
+            source,
+            output_dir,
+            model,
+            whisper_mode,
+            transcriber,
+            base_url=base_url,
+            api_key=api_key
+        )
+        results.append((source, success))
+
+    table = Table(title="批量处理结果", show_header=True, header_style="bold magenta")
+    table.add_column("来源")
+    table.add_column("结果")
+    for source, success in results:
+        table.add_row(source, "[green]成功[/green]" if success else "[red]失败[/red]")
+    console.print(table)
+
+    succeeded = sum(success for _, success in results)
+    console.print(f"[bold]完成: {succeeded}/{len(results)}[/bold]")
+    return succeeded == len(results)
+
+
+def run_interactive_mode(
+    output_dir: Path,
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None
+):
     """
     交互式连续处理模式
 
@@ -341,7 +426,7 @@ def run_interactive_mode(base_path: Path, model: Optional[str] = None):
     while True:
         console.print()
         url = Prompt.ask(
-            "[bold cyan]请输入视频链接 (输入 n 退出)[/bold cyan]",
+            "[bold cyan]请输入视频文件或链接 (输入 n 退出)[/bold cyan]",
             default="",
             show_default=False
         )
@@ -353,14 +438,20 @@ def run_interactive_mode(base_path: Path, model: Optional[str] = None):
 
         # 执行转换（支持重试）
         success, transcriber = run_conversion_with_retry(
-            url, base_path, model, whisper_mode, transcriber
+            url,
+            output_dir,
+            model,
+            whisper_mode,
+            transcriber,
+            base_url=base_url,
+            api_key=api_key
         )
 
         if success:
             # 询问是否继续
             console.print()
             continue_prompt = Prompt.ask(
-                "[bold]是否继续处理下一个视频? (y\/n)[/bold]",
+                "[bold]是否继续处理下一个视频? (y/n)[/bold]",
                 default="y"
             )
 
@@ -371,7 +462,7 @@ def run_interactive_mode(base_path: Path, model: Optional[str] = None):
             # 失败后询问是否重试或退出
             console.print()
             retry_prompt = Prompt.ask(
-                "[bold yellow]是否重新输入链接重试? (y\/n)[/bold yellow]",
+                "[bold yellow]是否重新输入链接重试? (y/n)[/bold yellow]",
                 default="y"
             )
 
@@ -382,23 +473,27 @@ def run_interactive_mode(base_path: Path, model: Optional[str] = None):
 
 
 def run_conversion_with_retry(
-    url: str,
-    base_path: Path,
-    model: str,
+    source: str,
+    output_dir: Path,
+    model: Optional[str],
     whisper_mode: str,
     transcriber=None,
-    max_retries: int = 3
+    max_retries: int = 3,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None
 ):
     """
     带重试机制的转换执行
 
     Args:
-        url: 视频链接
-        base_path: 基础路径
+        source: 视频文件或链接
+        output_dir: 结果目录
         model: LLM 模型
         whisper_mode: Whisper 模式
         transcriber: 转录器实例
         max_retries: 最大重试次数
+        base_url: LLM API 基础 URL
+        api_key: LLM API 密钥
 
     Returns:
         (success: bool, transcriber: Transcriber or None)
@@ -407,7 +502,13 @@ def run_conversion_with_retry(
 
     while attempt <= max_retries:
         success, transcriber = run_conversion(
-            url, base_path, model, whisper_mode, transcriber
+            source,
+            output_dir,
+            model,
+            whisper_mode,
+            transcriber,
+            base_url=base_url,
+            api_key=api_key
         )
 
         if success:
